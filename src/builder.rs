@@ -400,6 +400,33 @@ fn append_dir(dst: &mut Write, path: &Path, src_path: &Path, mode: HeaderMode) -
 }
 
 fn prepare_header(dst: &mut Write, header: &mut Header, path: &Path, link_name: Option<&Path>) -> io::Result<()> {
+    // Try to encode the link name directly in the header, but if it ends up not
+    // working (e.g. it's too long) then use the GNU-specific long name
+    // extension by emitting an entry which indicates that it's the link name
+    if let Some(link) = link_name {
+        if let Err(e) = header.set_link_name(link) {
+            let data = path2bytes(&link)?;
+            let max = header.as_old().name.len();
+            if data.len() < max {
+                return Err(e);
+            }
+            let mut header2 = Header::new_gnu();
+            header2.as_gnu_mut().unwrap().name[..13].clone_from_slice(b"././@LongLink");
+            header2.set_mode(0o644);
+            header2.set_uid(0);
+            header2.set_gid(0);
+            header2.set_mtime(0);
+            header2.set_size((data.len() + 1) as u64);
+            header2.set_entry_type(EntryType::new(b'K'));
+            header2.set_cksum();
+            let mut data2 = data.chain(io::repeat(0).take(0));
+            append(dst, &header2, &mut data2)?;
+
+            let path = bytes2path(Cow::Borrowed(&data[..max]))?;
+            header.set_path(&path)?;
+        }
+    }
+
     // Try to encode the path directly in the header, but if it ends up not
     // working (e.g. it's too long) then use the GNU-specific long name
     // extension by emitting an entry which indicates that it's the filename
@@ -426,29 +453,7 @@ fn prepare_header(dst: &mut Write, header: &mut Header, path: &Path, link_name: 
         header.set_path(&path)?;
     }
 
-    if let Some(link) = link_name {
-        if let Err(e) = header.set_link_name(link) {
-            let data = path2bytes(&link)?;
-            let max = header.as_old().name.len();
-            if data.len() < max {
-                return Err(e);
-            }
-            let mut header2 = Header::new_gnu();
-            header2.as_gnu_mut().unwrap().name[..13].clone_from_slice(b"././@LongLink");
-            header2.set_mode(0o644);
-            header2.set_uid(0);
-            header2.set_gid(0);
-            header2.set_mtime(0);
-            header2.set_size((data.len() + 1) as u64);
-            header2.set_entry_type(EntryType::new(b'K'));
-            header2.set_cksum();
-            let mut data2 = data.chain(io::repeat(0).take(0));
-            append(dst, &header2, &mut data2)?;
-
-            let path = bytes2path(Cow::Borrowed(&data[..max]))?;
-            header.set_path(&path)?;
-        }
-    }
+    
 
     Ok(())
 }
