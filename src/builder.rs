@@ -157,9 +157,46 @@ impl<W: Write> Builder<W> {
         path: P,
         data: R,
     ) -> io::Result<()> {
-        prepare_header(self.get_mut(), header, path.as_ref())?;
+        prepare_header(self.get_mut(), header, path.as_ref(), None)?;
         header.set_cksum();
         self.append(&header, data)
+    }
+
+    /// Adds a new symlink entry to the archive.
+    ///
+    /// This function will set the specified path and link name in the given
+    /// header, which may require appending a GNU long-name extension entry to
+    /// the archive first. The checksum for the header will be automatically
+    /// updated via the `set_cksum` method after setting the path. No other
+    /// metadata in the header will be modified.
+    ///
+    /// Note that this will not attempt to seek the archive to a valid position,
+    /// so if the archive is in the middle of a read or some other similar
+    /// operation then this may corrupt the archive.
+    ///
+    /// Also note that after all files have been written to an archive the
+    /// `finish` function needs to be called to finish writing the archive.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::fs;
+    /// use tar::Builder;
+    ///
+    /// let mut ar = Builder::new(Vec::new());
+    ///
+    /// // Use the directory at one location, but insert it into the archive
+    /// // with a different name.
+    /// ar.append_dir_all("bardir", ".").unwrap();
+    /// ```
+    pub fn append_link<P, Q>(&mut self, header: &mut Header, path: P, link_name: Q) -> io::Result<()>
+    where
+        P: AsRef<Path>,
+        Q: AsRef<Path>,
+    {
+        prepare_header(self.get_mut(), header, path.as_ref(), Some(link_name.as_ref()))?;
+        header.set_cksum();
+        self.append(header, io::empty())
     }
 
     /// Adds a file on the local filesystem to this archive.
@@ -362,7 +399,7 @@ fn append_dir(dst: &mut Write, path: &Path, src_path: &Path, mode: HeaderMode) -
     append_fs(dst, path, &stat, &mut io::empty(), mode, None)
 }
 
-fn prepare_header(dst: &mut Write, header: &mut Header, path: &Path) -> io::Result<()> {
+fn prepare_header(dst: &mut Write, header: &mut Header, path: &Path, link_name: Option<&Path>) -> io::Result<()> {
     // Try to encode the path directly in the header, but if it ends up not
     // working (e.g. it's too long) then use the GNU-specific long name
     // extension by emitting an entry which indicates that it's the filename
@@ -388,6 +425,31 @@ fn prepare_header(dst: &mut Write, header: &mut Header, path: &Path) -> io::Resu
         let path = bytes2path(Cow::Borrowed(&data[..max]))?;
         header.set_path(&path)?;
     }
+
+    if let Some(link) = link_name {
+        if let Err(e) = header.set_link_name(link) {
+            let data = path2bytes(&link)?;
+            let max = header.as_old().name.len();
+            if data.len() < max {
+                return Err(e);
+            }
+            let mut header2 = Header::new_gnu();
+            header2.as_gnu_mut().unwrap().name[..13].clone_from_slice(b"././@LongLink");
+            header2.set_mode(0o644);
+            header2.set_uid(0);
+            header2.set_gid(0);
+            header2.set_mtime(0);
+            header2.set_size((data.len() + 1) as u64);
+            header2.set_entry_type(EntryType::new(b'K'));
+            header2.set_cksum();
+            let mut data2 = data.chain(io::repeat(0).take(0));
+            append(dst, &header2, &mut data2)?;
+
+            let path = bytes2path(Cow::Borrowed(&data[..max]))?;
+            header.set_path(&path)?;
+        }
+    }
+
     Ok(())
 }
 
@@ -401,11 +463,8 @@ fn append_fs(
 ) -> io::Result<()> {
     let mut header = Header::new_gnu();
 
-    prepare_header(dst, &mut header, path)?;
+    prepare_header(dst, &mut header, path, link_name)?;
     header.set_metadata_in_mode(meta, mode);
-    if let Some(link_name) = link_name {
-        header.set_link_name(link_name)?;
-    }
     header.set_cksum();
     append(dst, &header, read)
 }
