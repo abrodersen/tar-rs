@@ -422,8 +422,8 @@ fn prepare_header(dst: &mut Write, header: &mut Header, path: &Path, link_name: 
             let mut data2 = data.chain(io::repeat(0).take(0));
             append(dst, &header2, &mut data2)?;
 
-            let path = bytes2path(Cow::Borrowed(&data[..max]))?;
-            header.set_path(&path)?;
+            let link = bytes2path(Cow::Borrowed(&data[..max]))?;
+            header.set_link_name(&link)?;
         }
     }
 
